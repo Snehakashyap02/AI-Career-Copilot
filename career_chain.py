@@ -1,6 +1,6 @@
 from langchain_classic.chains import LLMChain
 
-from models.llm import llm
+from llm import llm
 from prompts.roadmap_prompt import career_prompt
 
 from parsers.output_parser import format_instructions
