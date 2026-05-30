@@ -200,7 +200,7 @@ if generate:
     parsed_roadmap = None
 
     try:
-        from parsers.output_parser import parser as roadmap_parser
+        from output_parser import parser as roadmap_parser
 
         parsed_roadmap = roadmap_parser.parse(str(roadmap_response))
     except Exception:
