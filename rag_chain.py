@@ -1,6 +1,6 @@
 from langchain_classic.chains import RetrievalQA
 
-from models.llm import llm
+from llm import llm
 
 
 def create_rag_chain(retriever):
