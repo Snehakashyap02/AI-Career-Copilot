@@ -1,9 +1,9 @@
 from langchain_classic.chains import LLMChain
 
 from llm import llm
-from prompts.roadmap_prompt import career_prompt
+from roadmap_prompt import career_prompt
 
-from parsers.output_parser import format_instructions
+from output_parser import format_instructions
 
 
 # Wire format instructions into the prompt so the model can output in the
