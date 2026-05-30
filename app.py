@@ -4,11 +4,11 @@ import re
 import streamlit as st
 
 from career_chain import career_chain
-from rag_chain import rag_chain
-from document_processor import DocumentProcessor
-from retriever import Retriever
-from faiss_store import FAISSStore
-from output_parser import output_parser
+from rag_chain import create_rag_chain
+from document_processor import process_pdf
+from retriever import get_retriever
+from faiss_store import create_vectorstore
+from output_parser import parser as roadmap_parser
 
 
 st.set_page_config(
@@ -76,20 +76,6 @@ goal = st.sidebar.text_input(
 
 generate = st.sidebar.button("🚀 Generate Roadmap")
 
-context = ""
-if uploaded_file:
-    os.makedirs("data/resumes", exist_ok=True)
-    pdf_path = os.path.join("data/resumes", uploaded_file.name)
-
-    with open(pdf_path, "wb") as f:
-        f.write(uploaded_file.read())
-
-    chunks = process_pdf(pdf_path)
-    vector_db = create_vectorstore(chunks)
-    retriever = get_retriever(vector_db)
-    rag_chain = create_rag_chain(retriever)
-    context = rag_chain.run("Summarize the uploaded resume")
-
 
 def _extract_section_after_heading(text: str, heading: str, max_chars: int = 6000) -> str:
     """Return the raw text that appears after a heading until next major section."""
@@ -103,14 +89,14 @@ def _extract_section_after_heading(text: str, heading: str, max_chars: int = 600
 
     tail = text[m.end() : m.end() + max_chars]
 
-    # Cut off at next major section/separator if present
     cutoff_markers = [
         r"\n\s*=+\s*\n",
-        r"\n\s*STEP\s+\d+\s*:?",
-        r"\n\s*FINAL\s+RESUME\s+PROJECTS\s*:?",
-        r"\n\s*INTERVIEW\s+PREPARATION\s*:?",
+        r"\n\s*STEP\s+\d+\s*:?}",
+        r"\n\s*FINAL\s+RESUME\s+PROJECTS\s*:?}",
+        r"\n\s*INTERVIEW\s+PREPARATION\s*:?}",
         r"\n\s*CURRENT\s+ANALYSIS\s*",
     ]
+
     for marker in cutoff_markers:
         parts = re.split(marker, tail, maxsplit=1, flags=re.IGNORECASE)
         if parts and parts[0] != tail:
@@ -120,7 +106,7 @@ def _extract_section_after_heading(text: str, heading: str, max_chars: int = 600
 
 
 def extract_missing_skills(roadmap_response: str) -> list[str]:
-    """Extract bullet items from the model's "Missing Skills" section."""
+    """Extract bullet items from the model's Missing Skills section."""
     if not roadmap_response:
         return []
 
@@ -144,7 +130,6 @@ def extract_missing_skills(roadmap_response: str) -> list[str]:
         if not val:
             continue
 
-        # Skip labels that sometimes get parsed as items
         if re.match(
             r"^(WHY THIS IS IMPORTANT|WHAT TO LEARN|FREE RESOURCES|MINI PROJECT|ESTIMATED TIME)$",
             val,
@@ -154,7 +139,6 @@ def extract_missing_skills(roadmap_response: str) -> list[str]:
 
         skills_out.append(val)
 
-    # de-dup while preserving order
     seen = set()
     deduped: list[str] = []
     for s in skills_out:
@@ -173,10 +157,25 @@ def _safe_list(value):
     if isinstance(value, tuple):
         return list(value)
     if isinstance(value, str):
-        # if it looks like multiline content, treat each line as an item
         lines = [ln.strip() for ln in value.splitlines() if ln.strip()]
         return lines if lines else [value.strip()]
     return [str(value)]
+
+
+resume_context = ""
+
+if uploaded_file:
+    os.makedirs("data/resumes", exist_ok=True)
+    pdf_path = os.path.join("data/resumes", uploaded_file.name)
+
+    with open(pdf_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+
+    chunks = process_pdf(pdf_path)
+    vector_db = create_vectorstore(chunks)
+    retriever = get_retriever(vector_db)
+    resume_rag_chain = create_rag_chain(retriever)
+    resume_context = resume_rag_chain.run("Summarize the uploaded resume")
 
 
 if generate:
@@ -189,35 +188,30 @@ if generate:
             {
                 "skills": skills,
                 "goal": goal,
-                "resume_context": context,
+                "resume_context": resume_context,
             }
         )
 
-    # CURRENT ANALYSIS
     st.subheader("📊 Current Analysis")
 
     missing_skills: list[str] = []
     parsed_roadmap = None
 
     try:
-        from output_parser import parser as roadmap_parser
-
         parsed_roadmap = roadmap_parser.parse(str(roadmap_response))
     except Exception:
         parsed_roadmap = None
 
-    # Prefer extracting missing skills from the parsed roadmap markdown
     if isinstance(parsed_roadmap, dict):
         missing_from_model = parsed_roadmap.get("roadmap", "") or ""
         if missing_from_model:
             missing_skills = extract_missing_skills(str(missing_from_model))
 
-    # Fallback to extracting from the raw response text
     if not missing_skills:
         missing_skills = extract_missing_skills(str(roadmap_response))
 
-
     col1, col2, col3 = st.columns(3)
+
     with col1:
         st.markdown(
             f"""
@@ -239,14 +233,12 @@ if generate:
     with col3:
         st.markdown("### ❌ Missing Skills")
 
-        # If model provides a dedicated missing_skills field, prefer it.
         model_missing = None
         if isinstance(parsed_roadmap, dict):
             model_missing = parsed_roadmap.get("missing_skills")
 
         if model_missing:
             items = _safe_list(model_missing)
-            # If it comes as one multiline string, split lines into bullets.
             if isinstance(model_missing, str):
                 items = [ln.strip() for ln in model_missing.splitlines() if ln.strip()]
 
@@ -255,12 +247,11 @@ if generate:
                 s_str = s if isinstance(s, str) else str(s)
                 if len(s_str.strip()) < 3:
                     continue
-                # strip leading bullet marker if present
                 if s_str.lstrip().startswith("-"):
                     s_str = s_str.lstrip()[1:].strip()
-                # also strip any accidental label text
                 if s_str.lower().startswith("missing skills"):
                     continue
+
                 if s_str:
                     st.markdown(
                         f"""<div style="border:1px solid #374151; border-radius:10px; padding:10px; margin-bottom:10px;">
@@ -272,9 +263,7 @@ if generate:
 
             if not shown:
                 st.write("Not detected from model output.")
-
         else:
-
             if missing_skills:
                 for s in missing_skills:
                     st.markdown(
@@ -286,13 +275,10 @@ if generate:
             else:
                 st.write("Not detected from model output.")
 
-
-    # RESUME ANALYSIS (top)
-    if context:
+    if resume_context:
         st.subheader("📄 Resume Analysis")
-        st.write(context)
+        st.write(resume_context)
 
-    # ROADMAP + structured sections
     st.subheader("🚀 Personalized Learning Roadmap")
 
     if isinstance(parsed_roadmap, dict):
@@ -306,11 +292,14 @@ if generate:
             else:
                 st.write(roadmap_markdown)
 
-        # Projects
         projects = _safe_list(parsed_roadmap.get("projects", []))
         projects_items = []
         if isinstance(parsed_roadmap.get("projects"), str):
-            projects_items = [ln.strip() for ln in str(parsed_roadmap.get("projects", "")).splitlines() if ln.strip()]
+            projects_items = [
+                ln.strip()
+                for ln in str(parsed_roadmap.get("projects", "")).splitlines()
+                if ln.strip()
+            ]
         elif projects:
             projects_items = [str(x).strip() for x in projects if str(x).strip()]
 
@@ -324,30 +313,25 @@ if generate:
                     unsafe_allow_html=True,
                 )
 
-
-
-
-        # Timeline
         timeline = parsed_roadmap.get("timeline", [])
         timeline_list = _safe_list(timeline)
-        # If timeline is list-of-pairs, render nicely
         st_timeline_rendered = False
-        if isinstance(timeline, list) and timeline and all(isinstance(x, (list, tuple)) and len(x) == 2 for x in timeline):
+
+        if isinstance(timeline, list) and timeline and all(
+            isinstance(x, (list, tuple)) and len(x) == 2 for x in timeline
+        ):
             st.subheader("⏳ Suggested Timeline")
             for week, topic in timeline:
                 if str(week).strip() and str(topic).strip():
                     st.markdown(f"✅ **{week}** → {topic}")
                     st_timeline_rendered = True
 
-        if not st_timeline_rendered:
-            # If it’s a list of strings, still show it
-            if timeline_list:
-                st.subheader("⏳ Suggested Timeline")
-                for item in timeline_list:
-                    if str(item).strip():
-                        st.markdown(f"✅ {str(item).strip()}")
+        if not st_timeline_rendered and timeline_list:
+            st.subheader("⏳ Suggested Timeline")
+            for item in timeline_list:
+                if str(item).strip():
+                    st.markdown(f"✅ {str(item).strip()}")
 
-        # Interview Preparation
         interview_questions = _safe_list(parsed_roadmap.get("interview_questions", []))
         if interview_questions:
             st.subheader("🎯 Interview Preparation")
@@ -362,7 +346,6 @@ if generate:
                     unsafe_allow_html=True,
                 )
 
-        # Resources
         resources = _safe_list(parsed_roadmap.get("resources", []))
         if resources:
             st.subheader("📚 Recommended Resources")
@@ -376,6 +359,5 @@ if generate:
 </div>""",
                     unsafe_allow_html=True,
                 )
-
-
-
+    else:
+        st.write(str(roadmap_response))
